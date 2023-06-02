@@ -1,0 +1,621 @@
+* Core ML Stable Diffusion
+:PROPERTIES:
+:CUSTOM_ID: core-ml-stable-diffusion
+:END:
+
+
+这个仓库包含:
+- =python~coreml~stable~diffusion=,一个用于将 PyTorch 模型转换为 =Core ML= 格式并在 Python 中使用 Hugging Face [[&lt;<https://github.com/huggingface/>sers>][diffusers]] 进行图像生成的 Python 软件包
+- =StableDiffusion=,一个 Swift 软件包,开发人员可以将其添加到 Xcode 项目中作为依赖项,以在其应用程序中部署图像生成功能。Swift 软件包依赖于 =python_coreml_stable_diffusion= 生成的 Core ML 模型文件
+
+如果在安装或运行时遇到问题,请参阅[[#faq][FAQ]]部分。请在开始之前参阅[[#system-requirements][系统要求]]部分。
+
+***  System Requirements
+:PROPERTIES:
+:CUSTOM_ID: system-requirements
+:END:
+The following is recommended to use all the functionality in this
+repository:
+
+| Python | macOS | Xcode | iPadOS, iOS |
+|--------+-------+-------+-------------|
+| 3.8    | 13.1  | 14.3  | 16.2        |
+
+**  使用 Hugging Face Hub 上的现成 Core ML 模型
+:PROPERTIES:
+:CUSTOM_ID: using-ready-made-core-ml-models-from-hugging-face-hub
+:END:
+ Hugging Face 执行了[[#converting-models-to-coreml][转换流程]]对以下模型进行了转换,并在 Hub 上公开提供了 Core ML 权重。如果您想转换 Hub 上尚未提供的 Stable Diffusion 版本,请参阅[[#converting-models-to-core-ml][将模型转换为Core ML]]。
+
+- [[&lt;<https://hug>ace.co/apple/coreml-stable-diffusion-v1-4>][=CompVis/stable-diffusion-v1-4=]]
+- [[<https://huggingface.co/apple/coreml-stable-diffusion-v1-5>][=runwayml/stable-diffusion-v1-5=]]
+- [[&lt;<https://huggingface.co>e/coreml-stable-diffusion-2-base>][=stabilityai/stable-diffusion-2-base=]]
+
+如果您想使用任何这些模型,您可以下载权重,然后继续[[#image-generation-with-python][使用Python生成图像]]或[[#image-generation-with-swift][Swift]]。
+
+每个模型仓库中都有几个变种。您可以使用 =git= 和 =git lfs= 将整个仓库克隆下来以下载所有变种,或者选择性地下载您需要的变种。
+
+要使用 =git= 克隆仓库,请按以下步骤操作:
+
+1. *步骤1:* 为您的系统安装 =git lfs= 扩展。
+
+=git lfs= 将大文件存储在主 git 仓库之外,并在您克隆或签出后从相应的服务器下载它们。它在大多数包管理器中都可用,有关详细信息,请查看[[<https://git-lfs.com>][安装页面]]。
+
+2. *Step 2:* Enable =git lfs= by running this command once:
+    #+begin_src sh
+git lfs install
+    #+end_src
+
+3. *Step 3:*
+    对于Stable Diffusion 1.4版本,您将在终端中发出以下命令:
+    #+begin_src sh
+git clone https://huggingface.co/apple/coreml-stable-diffusion-v1-4
+#+end_src
+
+这将下载包含所有模型变体的仓库副本。
+
+如果您更喜欢下载特定的变体而不是克隆仓库,可以使用 =huggingface_hub= Python 库。例如,要使用 Python 进行生成并使用 =ORIGINAL= 注意实现(有关详细信息,请阅读[[#converting-models-to-core-ml][此部分]]),您可以使用以下帮助代码:
+
+#+begin_src python
+from huggingface_hub import snapshot_download
+from huggingface_hub.file_download import repo_folder_name
+from pathlib import Path
+import shutil
+
+repo_id = "apple/coreml-stable-diffusion-v1-4"
+variant = "original/packages"
+
+def download_model(repo_id, variant, output_dir):
+    destination = Path(output_dir) / (repo_id.split("/")[-1] + "_" + variant.replace("/", "_"))
+    if destination.exists():
+        raise Exception(f"Model already exists at {destination}")
+    
+    # Download and copy without symlinks
+    downloaded = snapshot_download(repo_id, allow_patterns=f"{variant}/*", cache_dir=output_dir)
+    downloaded_bundle = Path(downloaded) / variant
+    shutil.copytree(downloaded_bundle, destination)
+
+    # Remove all downloaded files
+    cache_folder = Path(output_dir) / repo_folder_name(repo_id=repo_id, repo_type="model")
+    shutil.rmtree(cache_folder)
+    return destination
+
+model_path = download_model(repo_id, variant, output_dir="./models")
+print(f"Model downloaded at {model_path}")
+#+end_src
+
+ =model_path= 将是检查点保存到本地文件系统的路径。有关更多详细信息,请参阅[[<https://huggingface.co/blog/diffusers-coreml>][此帖子]]。
+
+
+
+**  将模型转换为 Core ML
+:PROPERTIES:
+:CUSTOM_ID: converting-models-to-core-ml
+:END:
+
+1. *Step 1:* 创建 Python 环境并安装依赖项:
+    #+begin_src sh
+conda create -n coreml_stable_diffusion python=3.8 -y
+conda activate coreml_stable_diffusion
+cd /path/to/cloned/ml-stable-diffusion/repository
+pip install -e .
+    #+end_src
+
+2. *Step 2:* 登录或注册你的 =hugging Face= 帐号,生成一个用户访问令牌和使用这个令牌设置拥抱脸 API 在终端窗口中运行 ~~huggingface-cli login~ 登录。
+3. *Step 3:* 导航到稳定的版本 =hugging Face= 扩散,您想使用中心并接受使用条款。默认的模型版本是 =CompVis/stable-diffusion-v1-4= 。模型版本可能改变了用户，下一步中描述。
+4. *Step 4:* 从终端执行以下命令以生成 Core ML model 文件：(=.mlpackage=)
+    #+begin_src shell
+python -m python_coreml_stable_diffusion.torch2coreml --convert-unet --convert-text-encoder --convert-vae-decoder --convert-safety-checker -o <output-mlpackages-directory>
+    #+end_src
+
+*WARNING:* 这个命令将从 Hugging Face 下载几个GB的 PyTorch 检查点。请确保您连接 Wi-Fi 且有足够的磁盘空间。
+
+这通常在 M1 MacBook Pro 上需要15-20分钟。成功执行后, Stable Diffusion 由4个神经网络模型组成,将从 PyTorch 转换为 Core ML(=.mlpackage=)并保存到指定的 =<output-mlpackages-directory>= 。一些其他值得注意的参数:
+
+- =--precision= - 定点精度。默认为"float32",也可以是"float16"以进一步缩小模型大小。
+- =--model-version= - Hub模型ID。默认为 =CompVis/stable-diffusion-v1-4= 。要转换其他模型,请指定其 Hub ID。
+- =--chunk-unet= - 将 UNet 权重拆分为多个文件以兼容 iOS 和 iPadOS 设备。
+- =--no-quantized= - 禁用定点。默认情况下,转换脚本会执行简单的权重定点以减小模型大小。使用此标志可以禁用它。
+- =--cache-dir= - 缓存目录以重复使用下载的权重。这可以节省时间和带宽。
+
+一个示例命令可能如下:
+#+BEGIN_SRC elisp -n 1 :hl_lines 0-0,0-0
+python convert_to_coreml.py
+    --precision float16
+    --model-version CompVis/stable-diffusion-v1-4
+    --chunk-unet
+    --no-quantized
+    --cache-dir ./cache
+    <output-mlpackages-directory>
+#+END_SRC
+- =--model-version=: 模型版本默认为[[<https://huggingface.co/CompVis/stable-diffusion-v1-4>][CompVis/stable-diffusion-v1-4]]。开发人员可以指定 Hugging Face Hub 上提供的其他版本,例如[[<https://huggingface.co/stabilityai/stable-diffusion-2-base>][stabilityai/stable-diffusion-2-base]]和[[<https://huggingface.co/runwayml/stable-diffusion-v1-5>][runwayml/stable-diffusion-v1-5]]。
+
+- =--bundle-resources-for-swift-cli=: 编译所有4个模型并将其与文本标记化所需的资源一起打包到 =<output-mlpackages-directory>/Resources= 中,该资源应作为 Swift 包的输入提供。对于基于 diffusers 的 Python 管道,此标志不是必需的。
+
+- =--chunk-unet=: 将 Unet 模型拆分为两个大致相等的块(每个块的权重少于1GB),以便移动友好部署。这对 iOS 和 iPadOS 上的神经引擎部署*必需*。这对 macOS 不是必需的。Swift CLI 能够消耗 Unet 模型的块化版本和常规版本,但优先考虑前者。请注意,块 UNet 与 Python 管道不兼容,因为 Python 管道仅用于 macOS 。分块仅用于 Swift 进行设备部署。
+
+- =--attention-implementation=: 默认为 =SPLIT_EINSUM= ,这是[[<https://machinelearning.apple.com/research/neural-engine-transformers>][在苹果神经引擎上部署Transformers]]中描述的实现。 =--attention-implementation ORIGINAL= 将切换到另一种替代方法,应用于CPU或GPU部署。有关进一步指导,请参阅[[#performance-benchmark][性能基准]]部分。
+
+- =--check-output-correctness=: 将原始 PyTorch 模型的输出与最终 Core ML 模型的输出进行比较。此标志会显着增加RAM消耗,因此仅建议用于调试目的。
+
+- =--convert-controlnet=: 转换在此选项后指定的 ControlNet 模型。如果指定 =--convert-controlnet lllyasviel/sd-controlnet-mlsd lllyasviel/sd-controlnet-depth= ,这也可以转换多个模型。
+
+- =--unet-support-controlnet=: 启用转换后的 UNet 模型接收来自 ControlNet 的额外输入。这需要使用 ControlNet 生成图像并以不同的名称 =*_control-unet.mlpackage= 保存,与正常的 UNet 不同。另一方面,如果没有 ControlNet,此 UNet 模型无法工作。请仅使用常规 UNet 进行txt2img。
+
+**  Image Generation with Python
+:PROPERTIES:
+:CUSTOM_ID: image-generation-with-python
+:END:
+
+使用基于 [[https://github.com/huggingface/diffusers][diffusers]] 的示例Python管道进行 text-to-image 文本到图像生成的步骤:
+#+begin_src shell
+python -m python_coreml_stable_diffusion.pipeline --prompt "a photo of an astronaut riding a horse on mars" -i <output-mlpackages-directory> -o </path/to/output/image> --compute-unit ALL --seed 93
+#+end_src
+这里是 =python -m python_coreml_stable_diffusion.pipeline -h= 的一些值得注意的参数:
+
+- =-i=: 应指向上面 "将模型转换为 Core ML" 部分第4步的 =-o= 目录。
+- =--model-version=: 如果在将模型转换为 Core ML 时覆盖了默认的模型版本,则需要在这里指定相同的模型版本。
+- =--compute-unit=: 请注意,对于这个特定的实现,性能最好的计算单元在不同的硬件上可能不同。 =CPU_AND_GPU= 或 =CPU_AND_NE= 可能比 =ALL= 更快。有关进一步指导,请参阅 “性能基准” 部分。
+- =--scheduler=: 如果您想尝试不同的调度程序,可以在这里指定。有关可用选项,请参阅帮助菜单。您也可以通过 =--num-inference-steps= 指定自定义的推理步数,默认为50。
+- =--controlnet=: 使用此选项指定的 ControlNet 模型用于图像生成。使用格式 =--controlnet lllyasviel/sd-controlnet-mlsd lllyasviel/sd-controlnet-depth= 并确保与 =--controlnet-inputs= 一起使用。
+- =--controlnet-inputs=: 与每个 ControlNet 模型对应的图像输入。请以 =--controlnet= 中的模型相同的顺序提供图像路径,例如:
+  =--controlnet-inputs image_mlsd image_depth= 。
+
+除了上面列出的一些主要参数外,还有许多其他参数可用于调整和优化图像生成管道。我强烈建议您浏览该软件包的帮助菜单,了解所有可用参数及其功能。请让我知道如果您有任何其他问题!
+**  Image Generation with Swift
+
+***  System Requirements
+:PROPERTIES:
+:CUSTOM_ID: system-requirements-1
+:END:
+*Building* (minimum):
+
+- Xcode 14.3
+- Command Line Tools for Xcode 14.3
+
+Check [[https://developer.apple.com/download/all/?q=xcode][developer.apple.com]] for the latest versions.
+
+*Running* (minimum):
+
+| Mac        | iPad*       | iPhone*       |
+|------------+-------------+---------------|
+| macOS 13.1 | iPadOS 16.2 | iOS 16.2      |
+| M1         | M1          | iPhone 12 Pro |
+
+You will also need the resources generated by the =--bundle-resources-for-swift-cli= option described in
+[[#converting-models-to-coreml][Converting Models to Core ML]]
+
+Please see [[#faq][FAQ]] [[#q-mobile-app][Q6]] regarding deploying on iPad and iPhone.
+
+*** Example CLI Usage
+:PROPERTIES:
+:CUSTOM_ID: example-cli-usage
+:END:
+#+begin_src shell
+swift run StableDiffusionSample "a photo of an astronaut riding a horse on mars" --resource-path <output-mlpackages-directory>/Resources/ --seed 93 --output-path </path/to/output/image>
+#+end_src
+
+输出将根据提示和随机种子命名:
+
+例如: =</path/to/output/image>/a_photo_of_an_astronaut_riding_a_horse_on_mars.93.final.png=
+
+请使用 =--help= 标志了解批量生成和更多信息。
+
+*** Example Library Usage
+:PROPERTIES:
+:CUSTOM_ID: example-library-usage
+:END:
+#+begin_src swift
+import StableDiffusion
+...
+let pipeline = try StableDiffusionPipeline(resourcesAt: resourceURL)
+pipeline.loadResources()
+let image = try pipeline.generateImages(prompt: prompt, seed: seed).first
+#+end_src
+
+在 iOS 上,构造 =StableDiffusionPipeline= 时,应将 =reduceMemory= 选项设置为 =true= 。
+
+*** Swift Package Details
+:PROPERTIES:
+:CUSTOM_ID: swift-package-details
+:END:
+This Swift package contains two products:
+
+- =StableDiffusion= library
+- =StableDiffusionSample= command-line tool
+
+Both of these products require the Core ML models and tokenization
+resources to be supplied. When specifying resources via a directory path
+that directory must contain the following:
+
+- =TextEncoder.mlmodelc= (text embedding model)
+- =Unet.mlmodelc= or =UnetChunk1.mlmodelc= & =UnetChunk2.mlmodelc=
+  (denoising autoencoder model)
+- =VAEDecoder.mlmodelc= (image decoder model)
+- =vocab.json= (tokenizer vocabulary file)
+- =merges.text= (merges for byte pair encoding file)
+
+Optionally, for image2image, in-painting, or similar:
+
+- =VAEEncoder.mlmodelc= (image encoder model)
+
+Optionally, it may also include the safety checker model that some
+versions of Stable Diffusion include:
+
+- =SafetyChecker.mlmodelc=
+
+Optionally, for ControlNet:
+
+- =ControlledUNet.mlmodelc= or =ControlledUnetChunk1.mlmodelc= &
+  =ControlledUnetChunk2.mlmodelc= (enabled to receive ControlNet values)
+- =controlnet/= (directory containing ControlNet models)
+  - =LllyasvielSdControlnetMlsd.mlmodelc= (for example, from
+    lllyasviel/sd-controlnet-mlsd)
+  - =LllyasvielSdControlnetDepth.mlmodelc= (for example, from
+    lllyasviel/sd-controlnet-depth)
+  - Other models you converted
+
+Note that the chunked version of Unet is checked for first. Only if it
+is not present will the full =Unet.mlmodelc= be loaded. Chunking is
+required for iOS and iPadOS and not necessary for macOS.
+
+此 Swift 包包含两个产品:
+
+- =StableDiffusion= 库
+- =StableDiffusionSample= 命令行工具
+
+这两个产品都需要提供 Core ML 模型和令牌化资源。当通过目录路径指定资源时,该目录必须包含以下内容:
+
+- =TextEncoder.mlmodelc= (文本嵌入模型)
+- =Unet.mlmodelc= 或 =UnetChunk1.mlmodelc= & =UnetChunk2.mlmodelc= (降噪自动编码器模型)
+- =VAEDecoder.mlmodelc= (图像解码器模型)
+- =vocab.json= (令牌器词汇文件)
+- =merges.text= (用于字对编码的合并文件)
+
+可选地,对于image2image、修补或类似的功能:
+
+- =VAEEncoder.mlmodelc= (图像编码器模型)
+
+可选地,它还可以包括某些版本的 Stable Diffusion 所包含的安全性检查器模型:
+
+- =SafetyChecker.mlmodelc=
+
+可选地,对于 ControlNet:
+
+- =ControlledUNet.mlmodelc= 或 =ControlledUnetChunk1.mlmodelc= & =ControlledUnetChunk2.mlmodelc= (启用以接收 ControlNet 值)
+- =controlnet/= (包含 ControlNet 模型的目录)
+  - =LllyasvielSdControlnetMlsd.mlmodelc= (例如,来自 lllyasviel/sd-controlnet-mlsd)
+  - =LllyasvielSdControlnetDepth.mlmodelc= (例如,来自 lllyasviel/sd-controlnet-depth)
+  - 您转换的其他模型
+
+请注意,首先检查 Unet 的块状版本。只有当其不存在时,才会加载完整的 =Unet.mlmodelc= 。分块对 iOS 和 iPadOS 是必需的,对 macOS 不是必需的。
+
+**  Example Swift App
+:PROPERTIES:
+:CUSTOM_ID: example-swift-app
+:END:
+
+🤗 Hugging Face created an
+[[https://github.com/huggingface/swift-coreml-diffusers][open-source
+demo app]] on top of this library. It's written in native Swift and
+Swift UI, and runs on macOS, iOS and iPadOS. You can use the code as a
+starting point for your app, or to see how to integrate this library in
+your own projects.
+
+Hugging Face has made the app
+[[https://apps.apple.com/app/diffusers/id1666309574?mt=12][available in
+the Mac App Store]].
+
+**  Performance Benchmark
+:PROPERTIES:
+:CUSTOM_ID: performance-benchmark
+:END:
+
+Standard
+[[https://huggingface.co/CompVis/stable-diffusion-v1-4][CompVis/stable-diffusion-v1-4]]
+Benchmark
+
+| Device                             | =--compute-unit= | =--attention-implementation= | Latency (seconds) |
+|------------------------------------+------------------+------------------------------+-------------------|
+| Mac Studio (M1 Ultra, 64-core GPU) | =CPU_AND_GPU=    | =ORIGINAL=                   | 9                 |
+| Mac Studio (M1 Ultra, 48-core GPU) | =CPU_AND_GPU=    | =ORIGINAL=                   | 13                |
+| MacBook Pro (M1 Max, 32-core GPU)  | =CPU_AND_GPU=    | =ORIGINAL=                   | 18                |
+| MacBook Pro (M1 Max, 24-core GPU)  | =CPU_AND_GPU=    | =ORIGINAL=                   | 20                |
+| MacBook Pro (M1 Pro, 16-core GPU)  | =ALL=            | =SPLIT_EINSUM (default)=     | 26                |
+| MacBook Pro (M2)                   | =CPU_AND_NE=     | =SPLIT_EINSUM (default)=     | 23                |
+| MacBook Pro (M1)                   | =CPU_AND_NE=     | =SPLIT_EINSUM (default)=     | 35                |
+| iPad Pro (5th gen, M1)             | =CPU_AND_NE=     | =SPLIT_EINSUM (default)=     | 38                |
+
+Please see [[#important-notes-on-performance-benchmarks][Important Notes
+on Performance Benchmarks]] section for details.
+
+
+**  Important Notes on Performance Benchmarks
+:PROPERTIES:
+:CUSTOM_ID: important-notes-on-performance-benchmarks
+:END:
+
+- This benchmark was conducted by Apple using public beta versions of
+  iOS 16.2, iPadOS 16.2 and macOS 13.1 in November 2022.
+- The executed program is =python_coreml_stable_diffusion.pipeline= for
+  macOS devices and a minimal Swift test app built on the
+  =StableDiffusion= Swift package for iOS and iPadOS devices.
+- The median value across 3 end-to-end executions is reported.
+- Performance may materially differ across different versions of Stable
+  Diffusion due to architecture changes in the model itself. Each
+  reported number is specific to the model version mentioned in that
+  context.
+- The image generation procedure follows the standard configuration: 50
+  inference steps, 512x512 output image resolution, 77 text token
+  sequence length, classifier-free guidance (batch size of 2 for unet).
+- The actual prompt length does not impact performance because the Core
+  ML model is converted with a static shape that computes the forward
+  pass for all of the 77 elements (=tokenizer.model_max_length=) in the
+  text token sequence regardless of the actual length of the input text.
+- Pipelining across the 4 models is not optimized and these performance
+  numbers are subject to variance under increased system load from other
+  applications. Given these factors, we do not report sub-second
+  variance in latency.
+- Weights and activations are in float16 precision for both the GPU and
+  the Neural Engine.
+- The Swift CLI program consumes a peak memory of approximately 2.6GB
+  (without the safety checker), 2.1GB of which is model weights in
+  float16 precision. We applied
+  [[https://coremltools.readme.io/docs/compressing-ml-program-weights#use-affine-quantization][8-bit
+  weight quantization]] to reduce peak memory consumption by
+  approximately 1GB. However, we observed that it had an adverse effect
+  on generated image quality and we rolled it back. We encourage
+  developers to experiment with other advanced weight compression
+  techniques such as
+  [[https://coremltools.readme.io/docs/compressing-ml-program-weights#use-a-lookup-table][palettization]]
+  and/or
+  [[https://coremltools.readme.io/docs/compressing-ml-program-weights#use-sparse-representation][pruning]]
+  which may yield better results.
+- In the [[file:performance-benchmark][benchmark table]], we report the
+  best performing =--compute-unit= and =--attention-implementation=
+  values per device. The former does not modify the Core ML model and
+  can be applied during runtime. The latter modifies the Core ML model.
+  Note that the best performing compute unit is model version and
+  hardware-specific.
+
+**  Results with Different Compute Units
+:PROPERTIES:
+:CUSTOM_ID: results-with-different-compute-units
+:END:
+
+It is highly probable that there will be slight differences across
+generated images using different compute units.
+
+The following images were generated on an M1 MacBook Pro and macOS 13.1
+with the prompt /"a photo of an astronaut riding a horse on mars"/ using
+the
+[[https://huggingface.co/runwayml/stable-diffusion-v1-5][runwayml/stable-diffusion-v1-5]]
+model version. The random seed was set to 93:
+
+| CPU_AND_NE                                                                                                                                                        | CPU_AND_GPU                                                                                                                                                        | ALL                                                                                                                                                        |
+|-------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [[file:assets/a_high_quality_photo_of_an_astronaut_riding_a_horse_in_space/randomSeed_93_computeUnit_CPU_AND_NE_modelVersion_runwayml_stable-diffusion-v1-5.png]] | [[file:assets/a_high_quality_photo_of_an_astronaut_riding_a_horse_in_space/randomSeed_93_computeUnit_CPU_AND_GPU_modelVersion_runwayml_stable-diffusion-v1-5.png]] | [[file:assets/a_high_quality_photo_of_an_astronaut_riding_a_horse_in_space/randomSeed_93_computeUnit_ALL_modelVersion_runwayml_stable-diffusion-v1-5.png]] |
+
+Differences may be less or more pronounced for different inputs. Please
+see the [[#faq][FAQ]] Q8 for a detailed explanation.
+
+**  Results with ControlNet
+:PROPERTIES:
+:CUSTOM_ID: results-with-controlnet
+:END:
+
+[[https://huggingface.co/lllyasviel/ControlNet][ControlNet]] allows
+users to condition image generation with Stable Diffusion on signals
+such as edge maps, depth maps, segmentation maps, scribbles and pose.
+Thanks to
+[[https://github.com/apple/ml-stable-diffusion/pull/153][[cite/t:@ryu38]'s
+contribution]], both the Python CLI and the Swift package support
+ControlNet models. Please refer to CLI arguments in previous sections to
+exercise this new feature.
+
+Example results using the prompt "a high quality photo of a surfing dog"
+conditioned on the scribble (leftmost):
+
+**  FAQ
+:PROPERTIES:
+:CUSTOM_ID: faq
+:END:
+
+Q1: ERROR: Failed building wheel for tokenizers or error: can't find
+Rust compiler
+
+
+A1: Please review this
+[[https://github.com/huggingface/transformers/issues/2831#issuecomment-592724471][potential solution]].
+
+
+Q2: RuntimeError: {NSLocalizedDescription = "Error computing NN
+outputs."
+
+
+A2: There are many potential causes for this error. In this context, it
+is highly likely to be encountered when your system is under increased
+memory pressure from other applications. Reducing memory utilization of
+other applications is likely to help alleviate the issue.
+
+
+Q3: My Mac has 8GB RAM and I am converting models to Core ML using the
+example command. The process is getting killed because of memory issues.
+How do I fix this issue?
+
+
+A3: In order to minimize the memory impact of the model conversion
+process, please execute the following command instead:
+
+#+begin_src sh
+python -m python_coreml_stable_diffusion.torch2coreml --convert-vae-encoder -o <output-mlpackages-directory> && \
+python -m python_coreml_stable_diffusion.torch2coreml --convert-vae-decoder -o <output-mlpackages-directory> && \
+python -m python_coreml_stable_diffusion.torch2coreml --convert-unet -o <output-mlpackages-directory> && \
+python -m python_coreml_stable_diffusion.torch2coreml --convert-text-encoder -o <output-mlpackages-directory> && \
+python -m python_coreml_stable_diffusion.torch2coreml --convert-safety-checker -o <output-mlpackages-directory> &&
+#+end_src
+
+If you need =--chunk-unet=, you may do so in yet another independent
+command which will reuse the previously exported Unet model and simply
+chunk it in place:
+
+#+begin_src sh
+python -m python_coreml_stable_diffusion.torch2coreml --convert-unet --chunk-unet -o <output-mlpackages-directory>
+#+end_src
+
+Q4: My Mac has 8GB RAM, should image generation work on my machine?
+
+
+A4: Yes! Especially the =--compute-unit CPU_AND_NE= option should work
+under reasonable system load from other applications. Note that part of
+the [[#example-results][Example Results]] were generated using an M2
+MacBook Air with 8GB RAM.
+
+
+Q5: Every time I generate an image using the Python pipeline, loading
+all the Core ML models takes 2-3 minutes. Is this expected?
+
+A5: Yes and using the Swift library reduces this to just a few seconds.
+The reason is that =coremltools= loads Core ML models (=.mlpackage=) and
+each model is compiled to be run on the requested compute unit during
+load time. Because of the size and number of operations of the unet
+model, it takes around 2-3 minutes to compile it for Neural Engine
+execution. Other models should take at most a few seconds. Note that
+=coremltools= does not cache the compiled model for later loads so each
+load takes equally long. In order to benefit from compilation caching,
+=StableDiffusion= Swift package by default relies on compiled Core ML
+models (=.mlmodelc=) which will be compiled down for the requested
+compute unit upon first load but then the cache will be reused on
+subsequent loads until it is purged due to lack of use.
+
+If you intend to use the Python pipeline in an application, we recommend
+initializing the pipeline once so that the load time is only incurred
+once. Afterwards, generating images using different prompts and random
+seeds will not incur the load time for the current session of your
+application.
+
+Q6: I want to deploy StableDiffusion, the Swift package, in my mobile
+app. What should I be aware of?
+
+A6: The [[#image-gen-swift][Image Generation with Swift]] section
+describes the minimum SDK and OS versions as well as the device models
+supported by this package. We recommend carefully testing the package on
+the device with the least amount of RAM available among your deployment
+targets.
+
+The image generation process in =StableDiffusion= can yield over 2 GB of
+peak memory during runtime depending on the compute units selected. On
+iPadOS, we recommend using =.cpuAndNeuralEngine= in your configuration
+and the =reduceMemory= option when constructing a
+=StableDiffusionPipeline= to minimize memory pressure.
+
+If your app crashes during image generation, consider adding the
+[[https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_kernel_increased-memory-limit][Increased
+Memory Limit]] capability to inform the system that some of your app's
+core features may perform better by exceeding the default app memory
+limit on supported devices.
+
+On iOS, depending on the iPhone model, Stable Diffusion model versions,
+selected compute units, system load and design of your app, this may
+still not be sufficient to keep your apps peak memory under the limit.
+Please remember, because the device shares memory between apps and iOS
+processes, one app using too much memory can compromise the user
+experience across the whole device.
+
+Q7: How do I generate images with different resolutions using the same
+Core ML models?
+
+A7: The current version of =python_coreml_stable_diffusion= does not
+support single-model multi-resolution out of the box. However,
+developers may fork this project and leverage the
+[[https://coremltools.readme.io/docs/flexible-inputs][flexible shapes]]
+support from coremltools to extend the =torch2coreml= script by using
+=coremltools.EnumeratedShapes=. Note that, while the =text_encoder= is
+agnosti c to the image resolution, the inputs and outputs of
+=vae_decoder= and =unet= models are dependent on the desired image
+resolution.
+
+Q8: Are the Core ML and PyTorch generated images going to be identical?
+
+A8: If desired, the generated images across PyTorch and Core ML can be
+made approximately identical. However, it is not guaranteed by default.
+There are several factors that might lead to different images across
+PyTorch and Core ML:
+
+ 1. Random Number Generator Behavior
+
+The main source of potentially different results across PyTorch and Core
+ML is the Random Number Generator
+([[https://en.wikipedia.org/wiki/Random_number_generation][RNG]])
+behavior. PyTorch and Numpy have different sources of randomness.
+=python_coreml_stable_diffusion= generally relies on Numpy for RNG
+(e.g. latents initialization) and =StableDiffusion= Swift Library
+reproduces this RNG behavior by default. However, PyTorch-based
+pipelines such as Hugging Face =diffusers= relies on PyTorch's RNG
+behavior. Thanks to [cite/t:@liuliu]'s
+[[https://github.com/apple/ml-stable-diffusion/pull/124][contribution]],
+one can match the PyTorch (CPU) RNG behavior in Swift by specifying
+=--rng torch= which selects the =torchRNG= mode.
+
+ 2. PyTorch
+
+/"Completely reproducible results are not guaranteed across PyTorch
+releases, individual commits, or different platforms. Furthermore,
+results may not be reproducible between CPU and GPU executions, even
+when using identical seeds."/
+([[https://pytorch.org/docs/stable/notes/randomness.html#reproducibility][source]]).
+
+ 3. Model Function Drift During Conversion
+
+The difference in outputs across corresponding PyTorch and Core ML
+models is a potential cause. The signal integrity is tested during the
+conversion process (enabled via =--check-output-correctness= argument to
+=python_coreml_stable_diffusion.torch2coreml=) and it is verified to be
+above a minimum
+[[https://en.wikipedia.org/wiki/Peak_signal-to-noise_ratio][PSNR]] value
+as tested on random inputs. Note that this is simply a sanity check and
+does not guarantee this minimum PSNR across all possible inputs.
+Furthermore, the results are not guaranteed to be identical when
+executing the same Core ML models across different compute units. This
+is not expected to be a major source of difference as the sample visual
+results indicate in [[#results-with-different-compute-units][this section]].
+
+ 4. Weights and Activations Data Type
+
+When quantizing models from float32 to lower-precision data types such
+as float16, the generated images are
+[[https://lambdalabs.com/blog/inference-benchmark-stable-diffusion][known to vary slightly]] in semantics even when using the same PyTorch model.
+Core ML models generated by coremltools have float16 weights and
+activations by default
+[[https://github.com/apple/coremltools/blob/main/coremltools/converters/_converters_entry.py#L256][unless explicitly overridden]]. This is not expected to be a major source of
+difference.
+
+Q9: The model files are very large, how do I avoid a large binary for my
+App?
+
+A9: The recommended option is to prompt the user to download these
+assets upon first launch of the app. This keeps the app binary size
+independent of the Core ML models being deployed. Disclosing the size of
+the download to the user is extremely important as there could be data
+charges or storage impact that the user might not be comfortable with.
+
+Q10: =Could not initialize NNPACK! Reason: Unsupported hardware=
+
+
+A10: This warning is safe to ignore in the context of this repository.
+
+Q11: TracerWarning: Converting a tensor to a Python boolean might cause
+the trace to be incorrect
+
+
+A11: This warning is safe to ignore in the context of this repository.
+
+Q12: UserWarning: resource_tracker: There appear to be 1 leaked
+semaphore objects to clean up at shutdown
+
+A12: If this warning is printed right after zsh: killed python -m
+python_coreml_stable_diffusion.torch2coreml ... , then it is highly
+likely that your Mac has run out of memory while converting models to
+Core ML. Please see [[#low-mem-conversion][Q3]] from above for the
+solution.
+
